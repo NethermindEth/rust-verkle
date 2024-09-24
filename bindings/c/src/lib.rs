@@ -1,10 +1,11 @@
-use ffi_interface::{
-    deserialize_proof_query, deserialize_proof_query_uncompressed, deserialize_verifier_query,
-    deserialize_verifier_query_uncompressed, fr_from_le_bytes, Context,
-};
+use banderwagon::{fr_from_u64_limbs, Fr, PrimeField, Zero};
+use ffi_interface::{deserialize_proof_query, deserialize_proof_query_uncompressed, deserialize_verifier_query, deserialize_verifier_query_uncompressed, fr_from_le_bytes, get_tree_key_hash_flat_input, Context};
 use ipa_multipoint::committer::Committer;
 use ipa_multipoint::multiproof::{MultiPoint, MultiPointProof, ProverQuery, VerifierQuery};
 use ipa_multipoint::transcript::Transcript;
+
+
+pub(crate) const TWO_POW_128: Fr = fr_from_u64_limbs([0, 0, 1, 0]);
 
 #[allow(deprecated)]
 use ffi_interface::get_tree_key_hash;
@@ -61,6 +62,140 @@ pub extern "C" fn pedersen_hash(
         commitment_data_slice.copy_from_slice(&hash);
     }
 }
+
+
+#[allow(deprecated)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn pedersen_hash_flat(
+    ctx: *mut Context,
+    data: *const u8,
+    out: *mut u8,
+) {
+    if ctx.is_null() || data.is_null()  || out.is_null() {
+        // TODO: We have ommited the error handling for null pointers at the moment.
+        // TODO: Likely will panic in this case.
+        return;
+    }
+
+    let (data64, context) = unsafe {
+        let data_slice = std::slice::from_raw_parts(data, 64);
+        let ctx_ref = &*ctx;
+
+        (data_slice, ctx_ref)
+    };
+
+    let hash = get_tree_key_hash_flat_input(
+        context,
+        <[u8; 64]>::try_from(data64).unwrap(),
+    );
+
+    unsafe {
+        let commitment_data_slice = std::slice::from_raw_parts_mut(out, 32);
+        commitment_data_slice.copy_from_slice(&hash);
+    }
+}
+
+
+#[allow(deprecated)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn get_leaf_delta_both_value(
+    ctx: *mut Context,
+    sub_index: u8,
+    old_value: *const u8,
+    new_value: *const u8,
+    out: *mut u8,
+) {
+    if ctx.is_null() || old_value.is_null() || new_value.is_null() || out.is_null() {
+        // TODO: We have ommited the error handling for null pointers at the moment.
+        // TODO: Likely will panic in this case.
+        return;
+    }
+
+    let (new_value_slice, old_value_slice, context) = unsafe {
+        let old_slice = std::slice::from_raw_parts(old_value, 32);
+        let ctx_ref = &*ctx;
+        let new_slice = std::slice::from_raw_parts(new_value, 32);
+
+        (new_slice, old_slice, ctx_ref)
+    };
+
+    let new_value_low_16 = new_value_slice[0..16].to_vec();
+    let new_value_high_16 = new_value_slice[16..32].to_vec();
+
+    let old_value_low_16 = Fr::from_le_bytes_mod_order(&old_value_slice[0..16]) + TWO_POW_128;
+    let old_value_high_16 = Fr::from_le_bytes_mod_order(&old_value_slice[16..32]);
+
+    let delta_low =
+        Fr::from_le_bytes_mod_order(&new_value_low_16) + TWO_POW_128 - old_value_low_16;
+    let delta_high = Fr::from_le_bytes_mod_order(&new_value_high_16) - old_value_high_16;
+
+    let position = sub_index;
+    let pos_mod_128 = position % 128;
+
+    let low_index = 2 * pos_mod_128 as usize;
+    let high_index = low_index + 1;
+
+    let generator = context.committer.scalar_mul(delta_low, low_index)
+        + context.committer.scalar_mul(delta_high, high_index);
+
+    let hash = generator.to_bytes_uncompressed();
+    println!("hash: {:?}", hash);
+    unsafe {
+        let commitment_data_slice = std::slice::from_raw_parts_mut(out, 64);
+        commitment_data_slice.copy_from_slice(&hash);
+    }
+}
+
+#[allow(deprecated)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn get_leaf_delta_new_value(
+    ctx: *mut Context,
+    sub_index: u8,
+    new_value: *const u8,
+    out: *mut u8,
+) {
+    if ctx.is_null() || new_value.is_null() || out.is_null() {
+        // TODO: We have ommited the error handling for null pointers at the moment.
+        // TODO: Likely will panic in this case.
+        return;
+    }
+
+    let (new_value_slice, context) = unsafe {
+        let ctx_ref = &*ctx;
+        let new_slice = std::slice::from_raw_parts(new_value, 32);
+
+        (new_slice, ctx_ref)
+    };
+
+    let new_value_low_16 = new_value_slice[0..16].to_vec();
+    let new_value_high_16 = new_value_slice[16..32].to_vec();
+
+    let old_value_low_16 = Fr::zero();
+    let old_value_high_16 = Fr::zero();
+
+    let delta_low =
+        Fr::from_le_bytes_mod_order(&new_value_low_16) + TWO_POW_128 - old_value_low_16;
+    let delta_high = Fr::from_le_bytes_mod_order(&new_value_high_16) - old_value_high_16;
+
+    let position = sub_index;
+    let pos_mod_128 = position % 128;
+
+    let low_index = 2 * pos_mod_128 as usize;
+    let high_index = low_index + 1;
+
+    let generator = context.committer.scalar_mul(delta_low, low_index)
+        + context.committer.scalar_mul(delta_high, high_index);
+
+    let hash = generator.to_bytes_uncompressed();
+    unsafe {
+        let commitment_data_slice = std::slice::from_raw_parts_mut(out, 64);
+        commitment_data_slice.copy_from_slice(&hash);
+    }
+}
+
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
